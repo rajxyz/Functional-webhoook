@@ -20,6 +20,7 @@ console.log('FIREBASE_CLIENT_ID:', process.env.FIREBASE_CLIENT_ID || 'MISSING');
 console.log('FIREBASE_CLIENT_CERT_URL:', process.env.FIREBASE_CLIENT_CERT_URL || 'MISSING');
 console.log('MIGRATE_SECRET:', process.env.MIGRATE_SECRET ? 'FOUND' : 'MISSING');
 console.log('RAZORPAY_SECRET:', process.env.RAZORPAY_SECRET ? 'FOUND' : 'MISSING');
+console.log('DISABLE_SIGNATURE_CHECK:', process.env.DISABLE_SIGNATURE_CHECK === 'true' ? 'ENABLED' : 'DISABLED');
 console.log('===============================');
 
 // Exit if Firebase private key is missing
@@ -80,13 +81,19 @@ app.post('/migrate', async (req, res) => {
 app.post('/razorpay-webhook', async (req, res) => {
   const webhookSecret = process.env.RAZORPAY_SECRET;
   const signature = req.headers['x-razorpay-signature'];
-  const generatedSignature = crypto.createHmac('sha256', webhookSecret)
-                                   .update(req.rawBody)
-                                   .digest('hex');
 
-  if (signature !== generatedSignature) {
-    console.log('❌ Invalid Razorpay webhook signature');
-    return res.status(403).send({ success: false, error: 'Invalid signature' });
+  // Skip signature verification if testing mode is enabled
+  if (process.env.DISABLE_SIGNATURE_CHECK !== 'true') {
+    const generatedSignature = crypto.createHmac('sha256', webhookSecret)
+                                     .update(req.rawBody)
+                                     .digest('hex');
+
+    if (signature !== generatedSignature) {
+      console.log('❌ Invalid Razorpay webhook signature');
+      return res.status(403).send({ success: false, error: 'Invalid signature' });
+    }
+  } else {
+    console.log('⚡️ Signature validation skipped (testing mode)');
   }
 
   const event = req.body.event;
@@ -95,12 +102,10 @@ app.post('/razorpay-webhook', async (req, res) => {
   try {
     let userId;
 
-    // Payment captured event
     if (event === 'payment.captured') {
-      userId = payload.payment?.entity?.notes?.userId; // Make sure your frontend passes userId in notes
+      userId = payload.payment?.entity?.notes?.userId;
     }
 
-    // Subscription completed or activated
     if (event.startsWith('subscription.')) {
       userId = payload.subscription?.entity?.notes?.userId;
     }
@@ -133,6 +138,9 @@ app.get('/healthz', (req, res) => {
 // -------------------- Start Server --------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+
+
 
 
 

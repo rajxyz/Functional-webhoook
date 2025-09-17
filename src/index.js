@@ -2,9 +2,11 @@ const express = require('express');
 const admin = require('firebase-admin');
 const crypto = require('crypto');
 const app = express();
+
+// Middleware to store raw body for Razorpay signature verification
 app.use(express.json({
   verify: (req, res, buf) => {
-    req.rawBody = buf; // Store raw body for webhook signature verification
+    req.rawBody = buf;
   }
 }));
 
@@ -20,7 +22,7 @@ console.log('MIGRATE_SECRET:', process.env.MIGRATE_SECRET ? 'FOUND' : 'MISSING')
 console.log('RAZORPAY_SECRET:', process.env.RAZORPAY_SECRET ? 'FOUND' : 'MISSING');
 console.log('===============================');
 
-// Exit if private key is missing
+// Exit if Firebase private key is missing
 if (!process.env.FIREBASE_PRIVATE_KEY) {
   console.error('🚨 ERROR: FIREBASE_PRIVATE_KEY environment variable is missing!');
   process.exit(1);
@@ -50,7 +52,7 @@ const db = admin.firestore();
 // -------------------- Migration Webhook --------------------
 app.post('/migrate', async (req, res) => {
   const secret = req.headers['x-webhook-secret'];
-  console.log('🔐 Received webhook secret:', secret);
+  console.log('🔐 Received migration webhook secret:', secret);
 
   if (secret !== process.env.MIGRATE_SECRET) {
     return res.status(403).send({ success: false, error: 'Forbidden: Invalid secret' });
@@ -83,6 +85,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                                    .digest('hex');
 
   if (signature !== generatedSignature) {
+    console.log('❌ Invalid Razorpay webhook signature');
     return res.status(403).send({ success: false, error: 'Invalid signature' });
   }
 
@@ -90,19 +93,32 @@ app.post('/razorpay-webhook', async (req, res) => {
   const payload = req.body.payload;
 
   try {
-    if (event === 'payment.captured' || event === 'subscription.completed') {
-      const userEmail = payload.payment?.entity?.email || payload.subscription?.entity?.customer_email;
-      if (userEmail) {
-        const userRef = db.collection('subscriptions').doc(userEmail);
-        await userRef.set({
-          premium: true,
-          expiry_date: new Date(new Date().setFullYear(new Date().getFullYear() + 1)) // 1 year premium
-        }, { merge: true });
-        console.log(`✅ Premium unlocked for user: ${userEmail}`);
-      }
+    let userId;
+
+    // Payment captured event
+    if (event === 'payment.captured') {
+      userId = payload.payment?.entity?.notes?.userId; // Make sure your frontend passes userId in notes
     }
 
-    res.send({ success: true });
+    // Subscription completed or activated
+    if (event.startsWith('subscription.')) {
+      userId = payload.subscription?.entity?.notes?.userId;
+    }
+
+    if (userId) {
+      const userRef = db.collection('subscriptions').doc(userId);
+      await userRef.set({
+        premium: true,
+        expiry_date: admin.firestore.Timestamp.fromDate(new Date(new Date().setFullYear(new Date().getFullYear() + 1)))
+      }, { merge: true });
+
+      console.log(`✅ Premium unlocked for user: ${userId} via event ${event}`);
+    } else {
+      console.log('⚠️ No userId found in webhook payload');
+    }
+
+    res.status(200).send({ success: true });
+
   } catch (err) {
     console.error('❌ Razorpay webhook error:', err);
     res.status(500).send({ success: false, error: err.message });
@@ -117,6 +133,11 @@ app.get('/healthz', (req, res) => {
 // -------------------- Start Server --------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+
+
+
+
 
 
 

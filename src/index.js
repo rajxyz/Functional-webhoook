@@ -133,31 +133,22 @@ app.post('/razorpay-webhook', async (req, res) => {
 
 /* ============================================================
    🔒 AUTO LOCK MIDDLEWARE (REAL-TIME)
-   🔓 TEST UNLOCK: x-test-unlock header bypasses premium check
 ============================================================ */
 async function checkSubscription(req, res, next) {
-  // 🔓 TEST UNLOCK — remove this line before going live
-  if (req.headers['x-test-unlock'] === 'SuperSecretKey123') return next();
-
   const { userId } = req.body;
   if (!userId) return res.status(401).json({ error: "UserId required" });
 
-  try {
-    const snap = await db.collection('subscriptions').doc(userId).get();
-    if (!snap.exists) {
-      return res.status(403).json({ error: "Subscription required" });
-    }
-
-    const { premium, expiry_date } = snap.data();
-    if (!premium || !expiry_date || expiry_date.toDate() < new Date()) {
-      return res.status(403).json({ error: "Subscription expired" });
-    }
-
-    next(); // 🔓 Access allowed
-  } catch (err) {
-    console.error('checkSubscription error:', err);
-    return res.status(500).json({ error: "Subscription check failed" });
+  const snap = await db.collection('subscriptions').doc(userId).get();
+  if (!snap.exists) {
+    return res.status(403).json({ error: "Subscription required" });
   }
+
+  const { premium, expiry_date } = snap.data();
+  if (!premium || !expiry_date || expiry_date.toDate() < new Date()) {
+    return res.status(403).json({ error: "Subscription expired" });
+  }
+
+  next(); // 🔓 Access allowed
 }
 
 /* ============================================================
@@ -173,4 +164,12 @@ app.get('/healthz', (req, res) => res.json({ status: "ok" }));
 
 /* -------------------- Start Server -------------------- */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Server running on ${PORT}`));        
+
+
+
+
+
+
+
+

@@ -38,7 +38,7 @@ const PREMIUM_CURRENCY = "INR";
 const SUBSCRIPTION_DAYS = 30;
 
 // Add your real website origins in Render environment variable:
-// ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+// ALLOWED_ORIGINS=const API_BASE_URL = "https://functional-webhoook.onrender.com";
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((origin) => origin.trim())

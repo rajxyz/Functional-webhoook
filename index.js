@@ -1,7 +1,8 @@
 // ============================================
 // TOOLGRAM - MAIN BACKEND
 // Payment + Premium Subscription API
-// Premium price: ₹19 / 30 days
+// Premium: ₹19 / 30 days
+// DEBUG VERSION 2.0
 // ============================================
 
 const express = require("express");
@@ -11,9 +12,9 @@ const rateLimit = require("express-rate-limit");
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
 
-// --------------------------------------------
+// ============================================
 // 1. ENVIRONMENT VARIABLES
-// --------------------------------------------
+// ============================================
 
 const REQUIRED_ENV = [
   "FIREBASE_PROJECT_ID",
@@ -21,7 +22,7 @@ const REQUIRED_ENV = [
   "FIREBASE_CLIENT_EMAIL",
   "RAZORPAY_KEY_ID",
   "RAZORPAY_SECRET",
-  "RAZORPAY_WEBHOOK_SECRET",
+  "RAZORPAY_WEBHOOK_SECRET"
 ];
 
 for (const key of REQUIRED_ENV) {
@@ -30,86 +31,101 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
+if (!process.env.ALLOWED_ORIGINS) {
+  throw new Error("Missing environment variable: ALLOWED_ORIGINS");
+}
+
 const PORT = process.env.PORT || 3000;
 
-// ₹19 = 1900 paise
 const PREMIUM_AMOUNT = 1900;
 const PREMIUM_CURRENCY = "INR";
 const SUBSCRIPTION_DAYS = 30;
 
-// Add your real website origins in Render environment variable:
-// ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+const allowedOrigins = process.env.ALLOWED_ORIGINS
   .split(",")
-  .map((origin) => origin.trim())
+  .map(origin => origin.trim().replace(/\/$/, ""))
   .filter(Boolean);
 
-// --------------------------------------------
-// 2. FIREBASE ADMIN INITIALIZATION
-// --------------------------------------------
+// ============================================
+// 2. FIREBASE INITIALIZATION
+// ============================================
 
 if (!admin.apps.length) {
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-    }),
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n")
+    })
   });
 }
 
 const db = admin.firestore();
 const Timestamp = admin.firestore.Timestamp;
 
-// --------------------------------------------
+// ============================================
 // 3. RAZORPAY INITIALIZATION
-// --------------------------------------------
+// ============================================
 
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_SECRET,
+  key_secret: process.env.RAZORPAY_SECRET
 });
 
-// --------------------------------------------
-// 4. EXPRESS APP + CORS
-// --------------------------------------------
+// ============================================
+// 4. EXPRESS + CORS
+// ============================================
 
 const app = express();
 
 app.disable("x-powered-by");
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow server-to-server requests with no Origin header.
-      if (!origin) return callback(null, true);
+app.use((req, res, next) => {
+  console.log(
+    `[REQUEST] ${new Date().toISOString()} ${req.method} ${req.originalUrl}`,
+    "Origin:",
+    req.headers.origin || "NO ORIGIN"
+  );
+  next();
+});
 
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) {
+      return callback(null, true);
+    }
 
-      return callback(new Error("Origin not allowed by CORS"));
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+    const normalizedOrigin = origin.replace(/\/$/, "");
 
-app.options("*", cors());
+    if (allowedOrigins.includes(normalizedOrigin)) {
+      return callback(null, true);
+    }
 
-// Keep the raw request body for Razorpay webhook signature checking.
-app.use(
-  express.json({
-    limit: "1mb",
-    verify: (req, res, buffer) => {
-      req.rawBody = Buffer.from(buffer);
-    },
-  })
-);
+    console.error("[CORS BLOCKED]", {
+      receivedOrigin: origin,
+      allowedOrigins
+    });
 
-// --------------------------------------------
+    return callback(new Error("Origin not allowed by CORS"));
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+
+// Preserve raw body for Razorpay webhook signature.
+app.use(express.json({
+  limit: "1mb",
+  verify(req, res, buffer) {
+    req.rawBody = Buffer.from(buffer);
+  }
+}));
+
+// ============================================
 // 5. RATE LIMITING
-// --------------------------------------------
+// ============================================
 
 const paymentLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -118,20 +134,20 @@ const paymentLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    message: "Too many payment requests. Please try again later.",
-  },
+    message: "Too many payment requests. Try later."
+  }
 });
 
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 60,
   standardHeaders: "draft-7",
-  legacyHeaders: false,
+  legacyHeaders: false
 });
 
-// --------------------------------------------
+// ============================================
 // 6. SECURITY HELPERS
-// --------------------------------------------
+// ============================================
 
 function safeCompare(value1, value2) {
   if (
@@ -139,47 +155,41 @@ function safeCompare(value1, value2) {
     typeof value2 !== "string" ||
     !value1 ||
     !value2
-  ) {
-    return false;
-  }
+  ) return false;
 
-  const a = Buffer.from(value1, "utf8");
-  const b = Buffer.from(value2, "utf8");
+  const a = Buffer.from(value1);
+  const b = Buffer.from(value2);
 
-  if (a.length !== b.length) {
-    return false;
-  }
+  if (a.length !== b.length) return false;
 
   return crypto.timingSafeEqual(a, b);
 }
 
 function verifyPaymentSignature(orderId, paymentId, signature) {
-  const expectedSignature = crypto
+  const expected = crypto
     .createHmac("sha256", process.env.RAZORPAY_SECRET)
     .update(`${orderId}|${paymentId}`)
     .digest("hex");
 
-  return safeCompare(expectedSignature, signature);
+  return safeCompare(expected, signature);
 }
 
 function verifyWebhookSignature(req) {
-  if (!req.rawBody) return false;
+  const signature = req.headers["x-razorpay-signature"];
 
-  const receivedSignature = req.headers["x-razorpay-signature"];
+  if (!req.rawBody || !signature) return false;
 
-  if (!receivedSignature) return false;
-
-  const expectedSignature = crypto
+  const expected = crypto
     .createHmac("sha256", process.env.RAZORPAY_WEBHOOK_SECRET)
     .update(req.rawBody)
     .digest("hex");
 
-  return safeCompare(expectedSignature, receivedSignature);
+  return safeCompare(expected, signature);
 }
 
-// --------------------------------------------
-// 7. FIREBASE AUTHENTICATION MIDDLEWARE
-// --------------------------------------------
+// ============================================
+// 7. FIREBASE AUTHENTICATION
+// ============================================
 
 async function authenticateUser(req, res, next) {
   try {
@@ -188,50 +198,51 @@ async function authenticateUser(req, res, next) {
     if (!authHeader.startsWith("Bearer ")) {
       return res.status(401).json({
         success: false,
-        message: "Authentication required. Please log in.",
+        message: "Authentication required."
       });
     }
 
-    const idToken = authHeader.slice(7).trim();
+    const token = authHeader.slice(7).trim();
 
-    if (!idToken) {
+    if (!token) {
       return res.status(401).json({
         success: false,
-        message: "Invalid authentication token.",
+        message: "Empty authentication token."
       });
     }
 
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const decoded = await admin.auth().verifyIdToken(token);
 
     req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email || null,
+      uid: decoded.uid,
+      email: decoded.email || null
     };
 
     next();
+
   } catch (error) {
-    console.error("Authentication error:", error.message);
+    console.error("[AUTH ERROR]", error);
 
     return res.status(401).json({
       success: false,
-      message: "Session expired or invalid. Please log in again.",
+      message: "Invalid or expired Firebase session."
     });
   }
 }
 
-// --------------------------------------------
-// 8. CENTRAL SUBSCRIPTION CHECK
-// --------------------------------------------
+// ============================================
+// 8. SUBSCRIPTION CHECK
+// ============================================
 
 async function getSubscription(uid) {
-  const subscriptionRef = db.collection("subscriptions").doc(uid);
-  const snapshot = await subscriptionRef.get();
+  const ref = db.collection("subscriptions").doc(uid);
+  const snapshot = await ref.get();
 
   if (!snapshot.exists) {
     return {
       premium: false,
       status: "free",
-      expiryDate: null,
+      expiryDate: null
     };
   }
 
@@ -243,15 +254,19 @@ async function getSubscription(uid) {
     typeof expiry.toMillis === "function" &&
     expiry.toMillis() > Date.now();
 
-  const isPremium = data.premium === true && validExpiry;
+  const premium = data.premium === true && validExpiry;
 
   return {
-    premium: isPremium,
-    status: isPremium ? "premium" : data.premium === true ? "expired" : "free",
+    premium,
+    status: premium
+      ? "premium"
+      : data.premium === true
+        ? "expired"
+        : "free",
     expiryDate:
       expiry && typeof expiry.toDate === "function"
         ? expiry.toDate().toISOString()
-        : null,
+        : null
   };
 }
 
@@ -264,55 +279,57 @@ async function requirePremium(req, res, next) {
         success: false,
         premium: false,
         status: subscription.status,
-        message: "Premium subscription required.",
+        message: "Premium subscription required."
       });
     }
 
     req.subscription = subscription;
     next();
+
   } catch (error) {
-    console.error("Subscription check error:", error);
+    console.error("[PREMIUM CHECK ERROR]", error);
 
     return res.status(500).json({
       success: false,
-      message: "Unable to verify subscription.",
+      message: "Unable to verify subscription."
     });
   }
 }
 
-// --------------------------------------------
-// 9. SUBSCRIPTION ACTIVATION
-// --------------------------------------------
+// ============================================
+// 9. ACTIVATE SUBSCRIPTION
+// ============================================
 
 async function activateSubscription({
   uid,
   paymentId,
   orderId,
   amount,
-  currency,
+  currency
 }) {
   const paymentRef = db.collection("processedPayments").doc(paymentId);
   const subscriptionRef = db.collection("subscriptions").doc(uid);
   const orderRef = db.collection("paymentOrders").doc(orderId);
 
-  return db.runTransaction(async (transaction) => {
-    // IMPORTANT: All transaction reads happen before any writes.
-    const [paymentSnapshot, subscriptionSnapshot, orderSnapshot] =
-      await Promise.all([
-        transaction.get(paymentRef),
-        transaction.get(subscriptionRef),
-        transaction.get(orderRef),
-      ]);
+  return db.runTransaction(async transaction => {
+    const [
+      paymentSnapshot,
+      subscriptionSnapshot,
+      orderSnapshot
+    ] = await Promise.all([
+      transaction.get(paymentRef),
+      transaction.get(subscriptionRef),
+      transaction.get(orderRef)
+    ]);
 
-    // Prevent duplicate activation for the same payment.
     if (paymentSnapshot.exists) {
-      const existingSubscription = subscriptionSnapshot.exists
+      const existing = subscriptionSnapshot.exists
         ? subscriptionSnapshot.data()
         : {};
 
       return {
         alreadyProcessed: true,
-        expiryDate: existingSubscription.expiry_date || null,
+        expiryDate: existing.expiry_date || null
       };
     }
 
@@ -320,15 +337,15 @@ async function activateSubscription({
       throw new Error("Payment order not found.");
     }
 
-    const orderData = orderSnapshot.data();
+    const order = orderSnapshot.data();
 
-    if (orderData.userId !== uid) {
-      throw new Error("Payment order does not belong to this user.");
+    if (order.userId !== uid) {
+      throw new Error("Payment order ownership mismatch.");
     }
 
     if (
-      orderData.amount !== amount ||
-      orderData.currency !== currency ||
+      order.amount !== amount ||
+      order.currency !== currency ||
       amount !== PREMIUM_AMOUNT ||
       currency !== PREMIUM_CURRENCY
     ) {
@@ -336,42 +353,38 @@ async function activateSubscription({
     }
 
     const now = Timestamp.now();
-    const existingData = subscriptionSnapshot.exists
+
+    const existing = subscriptionSnapshot.exists
       ? subscriptionSnapshot.data()
       : {};
 
-    const existingExpiry = existingData.expiry_date;
+    const oldExpiry = existing.expiry_date;
 
-    const isExistingPlanActive =
-      existingData.premium === true &&
-      existingExpiry &&
-      typeof existingExpiry.toMillis === "function" &&
-      existingExpiry.toMillis() > now.toMillis();
+    const active =
+      existing.premium === true &&
+      oldExpiry &&
+      typeof oldExpiry.toMillis === "function" &&
+      oldExpiry.toMillis() > now.toMillis();
 
-    // Extend an active subscription; otherwise start from now.
-    const startDate = isExistingPlanActive
-      ? existingExpiry.toDate()
+    const startDate = active
+      ? oldExpiry.toDate()
       : now.toDate();
 
-    const newExpiryDate = new Date(
-      startDate.getTime() + SUBSCRIPTION_DAYS * 24 * 60 * 60 * 1000
+    const expiryDate = new Date(
+      startDate.getTime() +
+      SUBSCRIPTION_DAYS * 24 * 60 * 60 * 1000
     );
 
-    const newExpiryTimestamp = Timestamp.fromDate(newExpiryDate);
+    const expiryTimestamp = Timestamp.fromDate(expiryDate);
 
-    // All writes begin only after all reads have completed.
-    transaction.set(
-      subscriptionRef,
-      {
-        uid,
-        premium: true,
-        expiry_date: newExpiryTimestamp,
-        updated_at: now,
-        last_payment_id: paymentId,
-        last_order_id: orderId,
-      },
-      { merge: true }
-    );
+    transaction.set(subscriptionRef, {
+      uid,
+      premium: true,
+      expiry_date: expiryTimestamp,
+      updated_at: now,
+      last_payment_id: paymentId,
+      last_order_id: orderId
+    }, { merge: true });
 
     transaction.create(paymentRef, {
       uid,
@@ -380,29 +393,25 @@ async function activateSubscription({
       amount,
       currency,
       status: "paid",
-      created_at: now,
+      created_at: now
     });
 
-    transaction.set(
-      orderRef,
-      {
-        status: "paid",
-        paymentId,
-        paid_at: now,
-      },
-      { merge: true }
-    );
+    transaction.set(orderRef, {
+      status: "paid",
+      paymentId,
+      paid_at: now
+    }, { merge: true });
 
     return {
       alreadyProcessed: false,
-      expiryDate: newExpiryTimestamp,
+      expiryDate: expiryTimestamp
     };
   });
 }
 
-// --------------------------------------------
-// 10. CREATE RAZORPAY ORDER
-// --------------------------------------------
+// ============================================
+// 10. CREATE PAYMENT ORDER
+// ============================================
 
 app.post(
   "/create-order",
@@ -419,8 +428,8 @@ app.post(
         notes: {
           userId: uid,
           plan: "Toolgram Premium",
-          duration: "30 days",
-        },
+          duration: "30 days"
+        }
       });
 
       await db.collection("paymentOrders").doc(order.id).set({
@@ -429,7 +438,7 @@ app.post(
         amount: PREMIUM_AMOUNT,
         currency: PREMIUM_CURRENCY,
         status: "created",
-        created_at: Timestamp.now(),
+        created_at: Timestamp.now()
       });
 
       return res.json({
@@ -437,22 +446,23 @@ app.post(
         orderId: order.id,
         amount: PREMIUM_AMOUNT,
         currency: PREMIUM_CURRENCY,
-        keyId: process.env.RAZORPAY_KEY_ID,
+        keyId: process.env.RAZORPAY_KEY_ID
       });
+
     } catch (error) {
-      console.error("Create order error:", error);
+      console.error("[CREATE ORDER ERROR]", error);
 
       return res.status(500).json({
         success: false,
-        message: "Unable to create payment order.",
+        message: "Unable to create payment order."
       });
     }
   }
 );
 
-// --------------------------------------------
-// 11. VERIFY RAZORPAY PAYMENT
-// --------------------------------------------
+// ============================================
+// 11. VERIFY PAYMENT
+// ============================================
 
 app.post(
   "/verify-payment",
@@ -463,21 +473,20 @@ app.post(
       const {
         razorpay_order_id: orderId,
         razorpay_payment_id: paymentId,
-        razorpay_signature: signature,
+        razorpay_signature: signature
       } = req.body || {};
 
       if (!orderId || !paymentId || !signature) {
         return res.status(400).json({
           success: false,
-          message: "Missing payment verification details.",
+          message: "Missing payment verification details."
         });
       }
 
-      // Verify Razorpay checkout signature.
       if (!verifyPaymentSignature(orderId, paymentId, signature)) {
         return res.status(400).json({
           success: false,
-          message: "Invalid payment signature.",
+          message: "Invalid payment signature."
         });
       }
 
@@ -489,7 +498,7 @@ app.post(
       if (!orderSnapshot.exists) {
         return res.status(404).json({
           success: false,
-          message: "Payment order not found.",
+          message: "Payment order not found."
         });
       }
 
@@ -498,11 +507,10 @@ app.post(
       if (orderData.userId !== req.user.uid) {
         return res.status(403).json({
           success: false,
-          message: "This payment order does not belong to you.",
+          message: "Payment order ownership mismatch."
         });
       }
 
-      // Verify payment directly with Razorpay.
       const payment = await razorpay.payments.fetch(paymentId);
 
       if (
@@ -513,16 +521,16 @@ app.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Payment is not captured or payment details do not match.",
+          message: "Payment details do not match."
         });
       }
 
-      const result = await activateSubscription({
+      await activateSubscription({
         uid: req.user.uid,
         paymentId,
         orderId,
         amount: payment.amount,
-        currency: payment.currency,
+        currency: payment.currency
       });
 
       const subscription = await getSubscription(req.user.uid);
@@ -532,23 +540,23 @@ app.post(
         premium: subscription.premium,
         status: subscription.status,
         expiryDate: subscription.expiryDate,
-        alreadyProcessed: result.alreadyProcessed,
-        message: "Premium subscription activated successfully.",
+        message: "Premium activated successfully."
       });
+
     } catch (error) {
-      console.error("Payment verification error:", error);
+      console.error("[VERIFY PAYMENT ERROR]", error);
 
       return res.status(500).json({
         success: false,
-        message: "Payment verification failed. Please contact support if money was deducted.",
+        message: "Payment verification failed."
       });
     }
   }
 );
 
-// --------------------------------------------
+// ============================================
 // 12. RAZORPAY WEBHOOK
-// --------------------------------------------
+// ============================================
 
 app.post("/razorpay-webhook", async (req, res) => {
   try {
@@ -561,7 +569,7 @@ app.post("/razorpay-webhook", async (req, res) => {
     if (event.event !== "payment.captured") {
       return res.status(200).json({
         received: true,
-        ignored: true,
+        ignored: true
       });
     }
 
@@ -576,7 +584,7 @@ app.post("/razorpay-webhook", async (req, res) => {
     const uid = payment.notes?.userId;
 
     if (!paymentId || !orderId || !uid) {
-      return res.status(400).send("Required payment details missing");
+      return res.status(400).send("Payment details missing");
     }
 
     if (
@@ -584,7 +592,7 @@ app.post("/razorpay-webhook", async (req, res) => {
       payment.amount !== PREMIUM_AMOUNT ||
       payment.currency !== PREMIUM_CURRENCY
     ) {
-      return res.status(400).send("Payment details do not match");
+      return res.status(400).send("Payment details mismatch");
     }
 
     const orderSnapshot = await db
@@ -596,14 +604,14 @@ app.post("/razorpay-webhook", async (req, res) => {
       return res.status(404).send("Payment order not found");
     }
 
-    const orderData = orderSnapshot.data();
+    const order = orderSnapshot.data();
 
     if (
-      orderData.userId !== uid ||
-      orderData.amount !== PREMIUM_AMOUNT ||
-      orderData.currency !== PREMIUM_CURRENCY
+      order.userId !== uid ||
+      order.amount !== PREMIUM_AMOUNT ||
+      order.currency !== PREMIUM_CURRENCY
     ) {
-      return res.status(400).send("Order ownership or amount mismatch");
+      return res.status(400).send("Order mismatch");
     }
 
     await activateSubscription({
@@ -611,23 +619,23 @@ app.post("/razorpay-webhook", async (req, res) => {
       paymentId,
       orderId,
       amount: payment.amount,
-      currency: payment.currency,
+      currency: payment.currency
     });
 
     return res.status(200).json({
       received: true,
-      success: true,
+      success: true
     });
-  } catch (error) {
-    console.error("Webhook error:", error);
 
+  } catch (error) {
+    console.error("[WEBHOOK ERROR]", error);
     return res.status(500).send("Webhook processing failed");
   }
 });
 
-// --------------------------------------------
-// 13. SUBSCRIPTION STATUS API
-// --------------------------------------------
+// ============================================
+// 13. SUBSCRIPTION STATUS
+// ============================================
 
 app.get(
   "/subscription-status",
@@ -641,25 +649,23 @@ app.get(
         success: true,
         premium: subscription.premium,
         status: subscription.status,
-        expiryDate: subscription.expiryDate,
+        expiryDate: subscription.expiryDate
       });
+
     } catch (error) {
-      console.error("Subscription status error:", error);
+      console.error("[SUBSCRIPTION STATUS ERROR]", error);
 
       return res.status(500).json({
         success: false,
-        message: "Unable to fetch subscription status.",
+        message: "Unable to fetch subscription status."
       });
     }
   }
 );
 
-// --------------------------------------------
-// 14. PROTECTED AI ENDPOINT
-// --------------------------------------------
-
-// This endpoint is intentionally not implemented yet.
-// Add your actual AI generation logic here when ready.
+// ============================================
+// 14. PROTECTED AI API
+// ============================================
 
 app.post(
   "/ai-request",
@@ -669,62 +675,141 @@ app.post(
   async (req, res) => {
     return res.status(501).json({
       success: false,
-      message: "AI request functionality has not been connected yet.",
+      message: "AI functionality is not connected yet."
     });
   }
 );
 
-// --------------------------------------------
-// 15. HEALTH CHECK
-// --------------------------------------------
+// ============================================
+// 15. ROOT DIAGNOSTIC ROUTE
+// ============================================
+
+app.get("/", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    message: "TOOLGRAM ROOT INDEX IS RUNNING",
+    service: "Toolgram Main Backend",
+    version: "DEBUG-2026-11-15",
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================
+// 16. HEALTH CHECK
+// ============================================
 
 app.get("/healthz", (req, res) => {
   return res.status(200).json({
     success: true,
     service: "Toolgram Main Backend",
     status: "running",
+    timestamp: new Date().toISOString()
   });
 });
 
-// --------------------------------------------
-// 16. ERROR HANDLER
-// --------------------------------------------
+// ============================================
+// 17. CORS DIAGNOSTIC
+// ============================================
+
+app.get("/debug/cors", (req, res) => {
+  const origin = req.headers.origin || null;
+
+  return res.json({
+    success: true,
+    receivedOrigin: origin,
+    allowedOrigins,
+    originAllowed: !origin ||
+      allowedOrigins.includes(origin.replace(/\/$/, ""))
+  });
+});
+
+// ============================================
+// 18. ROUTE DIAGNOSTIC
+// ============================================
+
+app.get("/debug/routes", (req, res) => {
+  return res.json({
+    success: true,
+    service: "Toolgram Main Backend",
+    routes: [
+      "GET /",
+      "GET /healthz",
+      "GET /debug/cors",
+      "GET /debug/routes",
+      "GET /subscription-status",
+      "POST /create-order",
+      "POST /verify-payment",
+      "POST /razorpay-webhook",
+      "POST /ai-request"
+    ]
+  });
+});
+
+// ============================================
+// 19. NOT FOUND HANDLER
+// ============================================
+
+app.use((req, res) => {
+  console.error("[404 NOT FOUND]", {
+    method: req.method,
+    path: req.originalUrl,
+    origin: req.headers.origin || null
+  });
+
+  return res.status(404).json({
+    success: false,
+    error: "ROUTE_NOT_FOUND",
+    requestedPath: req.originalUrl,
+    method: req.method,
+    service: "TOOLGRAM ROOT INDEX"
+  });
+});
+
+// ============================================
+// 20. CORS + GLOBAL ERROR HANDLER
+// ============================================
 
 app.use((error, req, res, next) => {
-  console.error("Server error:", error.message);
+  console.error("[GLOBAL ERROR]", {
+    message: error.message,
+    path: req.originalUrl,
+    method: req.method
+  });
 
   if (res.headersSent) {
     return next(error);
   }
 
+  if (error.message === "Origin not allowed by CORS") {
+    return res.status(403).json({
+      success: false,
+      error: "CORS_ORIGIN_BLOCKED",
+      message: "This website origin is not allowed.",
+      receivedOrigin: req.headers.origin || null,
+      allowedOrigins
+    });
+  }
+
   return res.status(500).json({
     success: false,
-    message: "Internal server error.",
+    error: "INTERNAL_SERVER_ERROR",
+    message: "Internal server error."
   });
 });
 
-// --------------------------------------------
-// 17. START SERVER
-// --------------------------------------------
+// ============================================
+// 21. START SERVER
+// ============================================
 
 app.listen(PORT, () => {
-  console.log(`Toolgram backend running on port ${PORT}`);
+  console.log("====================================");
+  console.log("TOOLGRAM BACKEND STARTED");
+  console.log("====================================");
+  console.log("Port:", PORT);
+  console.log("Version: DEBUG-2026-11-15");
+  console.log("Allowed Origins:", allowedOrigins);
+  console.log("Root Directory Entry: index.js");
+  console.log("Health Route: /healthz");
+  console.log("====================================");
 });
-
-
-
-
-
-
-
     
-              
-
-
-        
-
-
-
-
-
-

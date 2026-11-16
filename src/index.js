@@ -704,3 +704,285 @@ app.post(
   }
 );
 
+
+// ==================================================
+// 15. RAZORPAY WEBHOOK
+// ==================================================
+
+app.post("/razorpay-webhook", async (req, res) => {
+  try {
+    console.log("[WEBHOOK] Request received:", req.requestId);
+
+    if (!verifyWebhookSignature(req)) {
+      console.error("[WEBHOOK] Invalid signature:", req.requestId);
+      return res.status(400).send("Invalid webhook signature");
+    }
+
+    const event = req.body;
+
+    console.log("[WEBHOOK] Event:", event.event);
+
+    if (event.event !== "payment.captured") {
+      return res.status(200).json({
+        received: true,
+        ignored: true,
+      });
+    }
+
+    const payment = event.payload?.payment?.entity;
+
+    if (!payment) {
+      return res.status(400).send("Payment data missing");
+    }
+
+    const paymentId = payment.id;
+    const orderId = payment.order_id;
+
+    if (!paymentId || !orderId) {
+      return res.status(400).send("Required payment details missing");
+    }
+
+    if (
+      payment.status !== "captured" ||
+      payment.amount !== PREMIUM_AMOUNT ||
+      payment.currency !== PREMIUM_CURRENCY
+    ) {
+      return res.status(400).send("Payment details do not match");
+    }
+
+    const orderSnapshot = await db
+      .collection("paymentOrders")
+      .doc(orderId)
+      .get();
+
+    if (!orderSnapshot.exists) {
+      return res.status(404).send("Payment order not found");
+    }
+
+    const orderData = orderSnapshot.data();
+    const uid = orderData.userId;
+
+    if (!uid) {
+      return res.status(400).send("Order user not found");
+    }
+
+    if (payment.notes?.userId && payment.notes.userId !== uid) {
+      return res.status(400).send("Payment user mismatch");
+    }
+
+    if (
+      orderData.amount !== PREMIUM_AMOUNT ||
+      orderData.currency !== PREMIUM_CURRENCY ||
+      payment.order_id !== orderData.orderId
+    ) {
+      return res.status(400).send("Order ownership or amount mismatch");
+    }
+
+    await activateSubscription({
+      uid,
+      paymentId,
+      orderId,
+      amount: payment.amount,
+      currency: payment.currency,
+    });
+
+    console.log("[WEBHOOK SUCCESS]", {
+      requestId: req.requestId,
+      orderId,
+      paymentId,
+    });
+
+    return res.status(200).json({
+      received: true,
+      success: true,
+    });
+  } catch (error) {
+    console.error("[WEBHOOK ERROR]", {
+      requestId: req.requestId,
+      message: error.message,
+      stack: error.stack,
+    });
+
+    return res.status(500).send("Webhook processing failed");
+  }
+});
+
+// ==================================================
+// 16. SUBSCRIPTION STATUS API
+// ==================================================
+
+app.get(
+  "/subscription-status",
+  apiLimiter,
+  authenticateUser,
+  async (req, res) => {
+    try {
+      console.log("[STATUS API] Started:", req.requestId);
+
+      const subscription = await getSubscription(req.user.uid);
+
+      console.log("[STATUS API SUCCESS]", {
+        requestId: req.requestId,
+        status: subscription.status,
+      });
+
+      return res.json({
+        success: true,
+        premium: subscription.premium,
+        status: subscription.status,
+        expiryDate: subscription.expiryDate,
+      });
+    } catch (error) {
+      console.error("[STATUS API ERROR]", {
+        requestId: req.requestId,
+        message: error.message,
+        stack: error.stack,
+      });
+
+      return res.status(500).json({
+        success: false,
+        message: "Unable to fetch subscription status.",
+      });
+    }
+  }
+);
+
+// ==================================================
+// 17. PROTECTED AI ENDPOINT PLACEHOLDER
+// ==================================================
+
+app.post(
+  "/ai-request",
+  apiLimiter,
+  authenticateUser,
+  requirePremium,
+  async (req, res) => {
+    return res.status(501).json({
+      success: false,
+      message: "AI request functionality has not been connected yet.",
+    });
+  }
+);
+
+// ==================================================
+// 18. HEALTH CHECK
+// ==================================================
+
+app.get("/", (req, res) => {
+  console.log("[HEALTH] Root endpoint accessed:", req.requestId);
+
+  return res.status(200).json({
+    success: true,
+    service: "Toolgram Main Backend",
+    status: "running",
+    requestId: req.requestId,
+  });
+});
+
+app.get("/healthz", (req, res) => {
+  console.log("[HEALTH] Health endpoint accessed:", req.requestId);
+
+  return res.status(200).json({
+    success: true,
+    service: "Toolgram Main Backend",
+    status: "running",
+    requestId: req.requestId,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ==================================================
+// 19. NOT FOUND HANDLER
+// ==================================================
+
+app.use((req, res) => {
+  console.warn("[404 NOT FOUND]", {
+    requestId: req.requestId,
+    method: req.method,
+    url: req.originalUrl,
+  });
+
+  return res.status(404).json({
+    success: false,
+    message: "API route not found.",
+    path: req.originalUrl,
+    requestId: req.requestId,
+  });
+});
+
+// ==================================================
+// 20. GLOBAL ERROR HANDLER
+// Must remain AFTER all routes.
+// ==================================================
+
+app.use((error, req, res, next) => {
+  console.error("\n========== GLOBAL BACKEND ERROR ==========");
+  console.error("Request ID:", req.requestId || "UNKNOWN");
+  console.error("Method:", req.method);
+  console.error("URL:", req.originalUrl);
+  console.error("Error name:", error.name);
+  console.error("Error message:", error.message);
+  console.error("Error stack:", error.stack);
+  console.error("===========================================\n");
+
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  if (error.message === "Origin not allowed by CORS") {
+    return res.status(403).json({
+      success: false,
+      message: "This website origin is not allowed.",
+      requestId: req.requestId,
+    });
+  }
+
+  if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid JSON request body.",
+      requestId: req.requestId,
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: "Internal server error.",
+    requestId: req.requestId,
+  });
+});
+
+// ==================================================
+// 21. PROCESS-LEVEL ERROR LOGGING
+// ==================================================
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED PROMISE REJECTION]", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[UNCAUGHT EXCEPTION]", error.stack || error.message);
+
+  // Exit so Render can restart the process in a clean state.
+  process.exit(1);
+});
+
+// ==================================================
+// 22. START SERVER
+// ==================================================
+
+const server = app.listen(PORT, () => {
+  console.log("\n============================================");
+  console.log("TOOLGRAM BACKEND STARTED SUCCESSFULLY");
+  console.log("Port:", PORT);
+  console.log("Environment:", process.env.NODE_ENV || "not specified");
+  console.log("Allowed Origins:", allowedOrigins);
+  console.log("Debug Logging: ENABLED");
+  console.log("Health URL: /healthz");
+  console.log("============================================\n");
+});
+
+server.on("error", (error) => {
+  console.error("[SERVER START ERROR]", error);
+});
+

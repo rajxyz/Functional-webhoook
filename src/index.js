@@ -2,7 +2,7 @@
 // ============================================
 // TOOLGRAM - MAIN BACKEND
 // Payment + Premium Subscription API
-// Premium: ₹19 / 30 days
+// Premium: Rs. 19 / 30 days
 // ============================================
 
 const express = require("express");
@@ -34,7 +34,7 @@ for (const key of REQUIRED_ENV) {
 
 const PORT = process.env.PORT || 3000;
 
-const PREMIUM_AMOUNT = 1900; // ₹19 in paise
+const PREMIUM_AMOUNT = 1900; // Rs. 19 in paise
 const PREMIUM_CURRENCY = "INR";
 const SUBSCRIPTION_DAYS = 30;
 
@@ -79,6 +79,9 @@ const razorpay = new Razorpay({
 const app = express();
 
 app.disable("x-powered-by");
+
+// Render runs behind a reverse proxy.
+app.set("trust proxy", 1);
 
 const corsOptions = {
   origin(origin, callback) {
@@ -547,7 +550,8 @@ app.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Payment is not captured or payment details do not match.",
+          message:
+            "Payment is not captured or payment details do not match.",
         });
       }
 
@@ -722,6 +726,14 @@ app.post(
 // 15. HEALTH CHECK
 // ============================================
 
+app.get("/", (req, res) => {
+  return res.status(200).json({
+    success: true,
+    service: "Toolgram Main Backend",
+    status: "running",
+  });
+});
+
 app.get("/healthz", (req, res) => {
   return res.status(200).json({
     success: true,
@@ -762,8 +774,6 @@ app.listen(PORT, () => {
   console.log(`Toolgram backend running on port ${PORT}`);
   console.log("Allowed website origins:", allowedOrigins);
 });
-
-
 
 
 
